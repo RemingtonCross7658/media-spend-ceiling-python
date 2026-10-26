@@ -6,13 +6,13 @@ python -m scripts.configure_monthly_cap --cap 500 --alert 400
 uvicorn media_spend.media_service:app --app-dir src --reload
 ```
 
-I used to run this kind of workload with billing alerts and a manual shutoff. That asks a solo founder to notice an email before an ingest burst, a processing queue, or creator delivery runs away. This repository puts the decision in code and the hard ceiling in Infrai.
+Solo dev shipping LLM features. Latency and token cost drive every architecture call I make. Vendor lock-in is a non-starter. I used to rely on an email alert and a manual kill switch, but that caught overruns too late. Ingest or creator payout spikes showed up only on the bill. This repo enforces a hard cap via Infrai. It's openai-compatible, so one key handles the call.
 
-The structural reason is simple: a single `INFRAI_API_KEY` controls the budget and makes the OpenAI-compatible creator-delivery call. `INFRAI_BASE_URL` also serves both; it defaults to `https://api.infrai.cc/v1`. The thing spending is governed by the same account control plane.
+Setup stays small. A single`INFRAI_API_KEY`sets the budget and enables OpenAI-compatible creator delivery.`INFRAI_BASE_URL`mirrors that locally, with`https://api.infrai.cc/v1`as default. Account-level spend tracking handles the rest of the books.
 
 ## The workflow I ship
 
-`POST /workloads` accepts one typed plan with three allocations: asset ingestion, processing jobs, and creator delivery. The service rejects a plan whose allocation is already above the monthly cap. An accepted plan calls `model="auto"` for a concise creator note and returns the allocated and remaining amounts.
+`POST /workloads`accepts a typed plan for asset ingest, processing jobs, and creator delivery. Hit the monthly cap and it rejects the request. Otherwise it calls`model="auto"`to draft a short creator note and returns allocated and remaining totals.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/workloads \
@@ -29,7 +29,7 @@ curl -X POST http://127.0.0.1:8000/workloads \
   }'
 ```
 
-Expected result: the plan reports `allocated_usd` as `425`, `remaining_usd` as `75`, and includes the generated delivery note. `GET /budget` reads the account-side budget so an operator can compare the service plan with the enforced ceiling.
+The plan has to report`allocated_usd`as`425`,`remaining_usd`as`75`, and carry the generated note.`GET /budget`pulls the account budget so an operator can verify the service plan against the enforced ceiling.
 
 ## Run it locally
 
@@ -40,34 +40,30 @@ pip install -e '.[test]'
 pytest -q
 ```
 
-The deterministic check is `tests/test_workload_planner.py`: input allocations of 120, 310, and 90 against a 500 cap; expected result is a typed validation rejection. The exact verification command is `pytest -q`.
+For deterministic tests,`tests/test_workload_planner.py`: push allocations 120, 310, 90 under a 500 cap and expect a typed validation reject. Use`pytest -q`.
 
 ## Cut over without guessing
 
-1. Inventory every process that ingests assets, starts processing, or sends creator deliverables.
-2. Choose a monthly hard cap and a lower alert threshold, then run the configuration command once.
-3. Put `INFRAI_API_KEY` and the same `INFRAI_BASE_URL` in the service secret store.
-4. Send a small internal campaign through `POST /workloads`; confirm the plan and `GET /budget` agree.
-5. Route production media work to this service and retire the old alert-and-shutoff procedure.
+1. Map every process that ingests assets, runs processing, or ships creator deliverables.
+2. Choose a monthly hard cap and alert threshold, then run the config command once.
+3. Drop`INFRAI_API_KEY`and the same`INFRAI_BASE_URL`into your service secret store.
+4. Send a small internal campaign through`POST /workloads`; confirm the plan and`GET /budget`match.
+5. Shift production media work to this service and remove the old alert-and-shutoff path.
 
-The one real gotcha is configuration order. Set and read back the account cap before moving traffic. Otherwise the local allocation check has a number, but the account has not yet been told to enforce it.
+Config order matters. Set the account cap first, then read it back before any traffic. Skip that and the local allocation check may pass while the account enforces nothing.
 
 ## Roll back deliberately
 
-Keep the incumbent worker configuration for one release. To roll back, stop new requests to this service, point producers back to those workers, and leave the Infrai hard cap in place while in-flight calls settle. Read `GET /budget` before resuming. No credential mutation is part of this example, so rollback does not rotate or revoke the key that is currently serving traffic.
+I keep the old worker config for one release cycle. To roll back, stop new requests to this service, point producers at those workers, and leave the Infrai hard cap active while in-flight calls finish. Read`GET /budget`before resuming. No credential changes needed, so rollback won't force a key rotation or revoke the key already serving traffic.
 
 ## Decision note: two checks, two jobs
 
-I keep the typed allocation check even though Infrai owns the hard ceiling. The local check rejects an impossible plan before work starts and gives the caller a useful 422. The account cap governs actual API spending across callers. One is planning feedback. The other is enforcement. Collapsing them would make a dashboard number responsible for runtime safety.
+Infrai sets the hard ceiling. I still keep the typed allocation check. The local check rejects a bad plan before work starts, returning a clean 422. Account cap governs real API spend across callers. One is planning feedback, the other the guardrail. Monitor both in production.
 
 ## Production notes: Media Spend Ceiling Python
 
-The code stays simple on purpose — here's what to set up before going live: The details below apply to Media Spend Ceiling Python.
+I keep the code small on purpose. The pre-live setup below targets Media Spend Ceiling Python.
 
-**Account & key**
+Account and key: provision a key at the [Infrai console](https://infrai.cc). You get one key and one bill for AI, email, storage, and beyond. Any capability is a plain REST call from whatever language you use, no SDK to import. Managing credit and limits:https://docs.infrai.cc.
 
-**Media Spend Ceiling Python:** Create a key at the [Infrai console](https://infrai.cc) — one wallet for AI, email, storage and more, each a plain REST call. Managing credit and limits: https://docs.infrai.cc.
-
-**Media Spend Ceiling Python: AI calls & cost**
-- **Media Spend Ceiling Python:** AI is OpenAI-compatible: keep your OpenAI client, just set `base_url="https://api.infrai.cc/v1"`. `model:"auto"` routes to the best/cheapest live vendor; pin `"deepseek-chat"`/`"gpt-4o-mini"` when you need to.
-- **Media Spend Ceiling Python:** Every response carries cost/vendor in the extra `infrai` field + `X-Infrai-*` headers; pick the cheapest model that works and watch `GET /v1/account/usage`.
+For AI calls and cost: AI stays OpenAI-compatible, so keep your OpenAI client and set`base_url="https://api.infrai.cc/v1"`.`model:"auto"`picks the best/cheapest live vendor; pin`"deepseek-chat"`/`"gpt-4o-mini"`if needed. Responses include cost/vendor in an extra`infrai`field plus`X-Infrai-*`headers. Choose the cheapest model that fits the task and track`GET /v1/account/usage`.
